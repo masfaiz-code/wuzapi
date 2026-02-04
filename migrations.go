@@ -257,7 +257,7 @@ func createMigrationsTable(db *sqlx.DB) error {
 		err = db.Get(&tableExists, `
 			SELECT EXISTS (
 				SELECT 1 FROM information_schema.tables 
-				WHERE table_name = 'migrations'
+				WHERE table_schema = 'public' AND table_name = 'migrations'
 			)`)
 	case "sqlite":
 		err = db.Get(&tableExists, `
@@ -277,12 +277,26 @@ func createMigrationsTable(db *sqlx.DB) error {
 		return nil
 	}
 
-	_, err = db.Exec(`
-		CREATE TABLE migrations (
-			id INTEGER PRIMARY KEY,
-			name TEXT NOT NULL,
-			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`)
+	// Create table with driver-specific syntax
+	var createSQL string
+	switch db.DriverName() {
+	case "postgres":
+		createSQL = `
+			CREATE TABLE IF NOT EXISTS migrations (
+				id INTEGER PRIMARY KEY,
+				name TEXT NOT NULL,
+				applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			)`
+	case "sqlite":
+		createSQL = `
+			CREATE TABLE IF NOT EXISTS migrations (
+				id INTEGER PRIMARY KEY,
+				name TEXT NOT NULL,
+				applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			)`
+	}
+
+	_, err = db.Exec(createSQL)
 	if err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
