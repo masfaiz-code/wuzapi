@@ -62,6 +62,10 @@ var (
 	mode                = flag.String("mode", "http", "Server mode: http or stdio")
 	dataDir             = flag.String("datadir", "", "Data directory for database and session files (defaults to executable directory)")
 
+	// Album grouping settings
+	albumGroupingEnabled = flag.Bool("albumgrouping", true, "Enable album/gallery message grouping")
+	albumWaitSeconds     = flag.Int("albumwaitseconds", 5, "Seconds to wait before sending album webhook")
+
 	globalHMACKeyEncrypted []byte
 
 	webhookRetryEnabled      = flag.Bool("webhookretry", true, "Enable webhook retry mechanism")
@@ -357,6 +361,17 @@ func main() {
 	}
 
 	InitRabbitMQ()
+
+	// Initialize album buffer with environment variable overrides
+	if v := os.Getenv("WUZAPI_ALBUM_GROUPING"); v != "" {
+		*albumGroupingEnabled = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("WUZAPI_ALBUM_WAIT_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && seconds > 0 {
+			*albumWaitSeconds = seconds
+		}
+	}
+	InitAlbumBuffer(*albumWaitSeconds, *albumGroupingEnabled)
 
 	ex, err := os.Executable()
 	if err != nil {

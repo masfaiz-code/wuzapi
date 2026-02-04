@@ -651,6 +651,41 @@ func fileToBase64(filepath string) (string, string, error) {
 	return base64.StdEncoding.EncodeToString(data), mimeType, nil
 }
 
+// getAlbumIDFromMessage extracts the parent message key (album ID) from a message
+// if it's part of an album/gallery. Returns empty string if not an album message.
+func getAlbumIDFromMessage(evt *events.Message) string {
+	if evt == nil || evt.Message == nil {
+		return ""
+	}
+
+	// Check imageMessage
+	if img := evt.Message.GetImageMessage(); img != nil {
+		if ctx := img.GetContextInfo(); ctx != nil {
+			// Check messageContextInfo in the raw message for messageAssociation
+			// The parentMessageKey is in messageContextInfo.messageAssociation.parentMessageKey
+		}
+	}
+
+	// For album detection, we need to check the raw message's messageContextInfo
+	// which contains messageAssociation with parentMessageKey
+	// This is accessed through the protobuf structure
+
+	// Check for messageContextInfo in the raw message
+	if evt.RawMessage != nil {
+		if msgCtxInfo := evt.RawMessage.GetMessageContextInfo(); msgCtxInfo != nil {
+			if msgAssoc := msgCtxInfo.GetMessageAssociation(); msgAssoc != nil {
+				if parentKey := msgAssoc.GetParentMessageKey(); parentKey != nil {
+					if id := parentKey.GetID(); id != "" {
+						return id
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	txtid := mycli.userID
 	postmap := make(map[string]interface{})
@@ -1849,6 +1884,73 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	}
 
 	if dowebhook == 1 {
-		sendEventWithWebHook(mycli, postmap, path)
+		// Check if this is a media message that's part of an album
+		shouldBuffer := false
+		var albumID string
+		var currentEvt *events.Message
+
+		if postmap["type"] == "Message" {
+			if msgEvt, ok := rawEvt.(*events.Message); ok {
+				currentEvt = msgEvt
+				albumID = getAlbumIDFromMessage(msgEvt)
+				if albumID != "" && albumBuffer != nil && albumBuffer.IsEnabled() {
+					// Check if it's a media message (image, video, document)
+					if msgEvt.Message.GetImageMessage() != nil ||
+						msgEvt.Message.GetVideoMessage() != nil ||
+						msgEvt.Message.GetDocumentMessage() != nil {
+						shouldBuffer = true
+					}
+				}
+			}
+		}
+
+		if shouldBuffer && currentEvt != nil {
+			// Add to album buffer instead of sending immediately
+			albumMsg := AlbumMessage{
+				ID: currentEvt.Info.ID,
+			}
+
+			// Extract media-specific data from postmap
+			if base64, ok := postmap["base64"].(string); ok {
+				albumMsg.Base64 = base64
+			}
+			if mimeType, ok := postmap["mimeType"].(string); ok {
+				albumMsg.MimeType = mimeType
+			}
+			if fileName, ok := postmap["fileName"].(string); ok {
+				albumMsg.FileName = fileName
+			}
+			if s3Data, ok := postmap["s3"].(map[string]interface{}); ok {
+				albumMsg.S3 = s3Data
+			}
+
+			// Get caption from media message
+			caption := ""
+			if img := currentEvt.Message.GetImageMessage(); img != nil {
+				caption = img.GetCaption()
+			} else if vid := currentEvt.Message.GetVideoMessage(); vid != nil {
+				caption = vid.GetCaption()
+			} else if doc := currentEvt.Message.GetDocumentMessage(); doc != nil {
+				caption = doc.GetCaption()
+			}
+
+			metadata := &AlbumData{
+				ChatJID:   currentEvt.Info.Chat.String(),
+				SenderJID: currentEvt.Info.Sender.String(),
+				SenderAlt: currentEvt.Info.Sender.ToNonAD().String(),
+				Caption:   caption,
+				Timestamp: currentEvt.Info.Timestamp,
+				MyCli:     mycli,
+			}
+
+			albumBuffer.AddMessage(albumID, albumMsg, metadata)
+			log.Debug().
+				Str("albumId", albumID).
+				Str("messageId", currentEvt.Info.ID).
+				Msg("Message added to album buffer, webhook deferred")
+		} else {
+			// Regular message - send webhook immediately
+			sendEventWithWebHook(mycli, postmap, path)
+		}
 	}
 }

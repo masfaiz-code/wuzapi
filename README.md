@@ -197,6 +197,94 @@ When enabled:
 * This works alongside webhook configurations - events will be sent to both RabbitMQ and any configured webhooks
 * The integration is global and affects all instances
 
+### Album Grouping (Image Gallery Support)
+
+WuzAPI supports grouping multiple images sent as a WhatsApp album/gallery into a single webhook event. This is particularly useful when integrating with automation tools like n8n that may have trouble handling multiple rapid webhook calls.
+
+#### The Problem
+
+When a user sends multiple images as a gallery in WhatsApp:
+- WhatsApp delivers each image as a separate message event
+- These messages arrive almost simultaneously (within ~1 second)
+- Webhook receivers may only process one of them, missing the others
+
+#### The Solution
+
+Album Grouping buffers media messages that are part of the same album and sends them as a single `MessageAlbum` webhook event after a configurable wait time.
+
+#### Environment Variables
+
+```
+WUZAPI_ALBUM_GROUPING=true      # Enable/disable album grouping (default: true)
+WUZAPI_ALBUM_WAIT_SECONDS=5     # Seconds to wait for more images before sending (default: 5)
+```
+
+#### How It Works
+
+1. When an image/video/document with a `parentMessageKey` is received, it's identified as part of an album
+2. The message is buffered instead of being sent immediately
+3. A timer starts (or resets if already running) for the album
+4. After the wait time expires with no new messages, all buffered images are sent as a single `MessageAlbum` event
+5. Regular messages (without album markers) are sent immediately as before
+
+#### MessageAlbum Webhook Payload
+
+```json
+{
+  "type": "MessageAlbum",
+  "albumId": "AC2BDB08F7A42B5E9ABCD1234567890",
+  "sender": "6281234567890@s.whatsapp.net",
+  "senderLid": "6281234567890:123@lid",
+  "chat": "120363213309213777@g.us",
+  "caption": "Check out these photos!",
+  "timestamp": "2026-02-04T15:42:57+07:00",
+  "totalImages": 3,
+  "images": [
+    {
+      "id": "3EB0ABC123456789",
+      "base64": "...",
+      "mimeType": "image/jpeg",
+      "fileName": "3EB0ABC123456789.jpg",
+      "s3": {
+        "url": "https://...",
+        "bucket": "...",
+        "key": "..."
+      }
+    },
+    {
+      "id": "3EB0DEF987654321",
+      "base64": "...",
+      "mimeType": "image/jpeg",
+      "fileName": "3EB0DEF987654321.jpg"
+    },
+    {
+      "id": "3EB0GHI456789012",
+      "base64": "...",
+      "mimeType": "image/jpeg",
+      "fileName": "3EB0GHI456789012.jpg"
+    }
+  ]
+}
+```
+
+#### Event Subscription
+
+To receive `MessageAlbum` events, add it to your webhook event subscription:
+
+```json
+{
+  "events": "Message,MessageAlbum,ReadReceipt"
+}
+```
+
+#### Notes
+
+- Album grouping only affects image, video, and document messages that are part of a gallery
+- Single images and regular messages are sent immediately (no buffering)
+- The `caption` field contains the caption from any image in the album that has one
+- Each image includes its own `id`, `base64`/`s3` data, `mimeType`, and `fileName`
+- The feature is enabled by default but can be disabled by setting `WUZAPI_ALBUM_GROUPING=false`
+
 ### Webhook Security with HMAC
 
 WuzAPI supports HMAC signatures for webhook verification:
