@@ -351,19 +351,34 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
                     proxy_url TEXT DEFAULT ''
                 )`)
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL - use simple CREATE TABLE IF NOT EXISTS (pooler compatible)
+			err = createTableIfNotExistsPostgres(tx, "users", `
+				CREATE TABLE IF NOT EXISTS users (
+					id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					token TEXT NOT NULL,
+					webhook TEXT NOT NULL DEFAULT '',
+					jid TEXT NOT NULL DEFAULT '',
+					qrcode TEXT NOT NULL DEFAULT '',
+					connected INTEGER,
+					expiration INTEGER,
+					events TEXT NOT NULL DEFAULT '',
+					proxy_url TEXT DEFAULT ''
+				)`)
 		}
 	} else if migration.ID == 2 {
 		if db.DriverName() == "sqlite" {
 			err = addColumnIfNotExistsSQLite(tx, "users", "proxy_url", "TEXT DEFAULT ''")
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL - use pooler-compatible column add
+			err = addColumnIfNotExistsPostgres(tx, "users", "proxy_url", "TEXT DEFAULT ''")
 		}
 	} else if migration.ID == 3 {
 		if db.DriverName() == "sqlite" {
 			err = migrateSQLiteIDToString(tx)
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL - check if migration needed and do it without PL/pgSQL
+			err = migratePostgresIDToString(tx)
 		}
 	} else if migration.ID == 4 {
 		if db.DriverName() == "sqlite" {
@@ -397,7 +412,35 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
 				err = addColumnIfNotExistsSQLite(tx, "users", "s3_retention_days", "INTEGER DEFAULT 30")
 			}
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL - use pooler-compatible column adds
+			err = addColumnIfNotExistsPostgres(tx, "users", "s3_enabled", "BOOLEAN DEFAULT FALSE")
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_endpoint", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_region", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_bucket", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_access_key", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_secret_key", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_path_style", "BOOLEAN DEFAULT TRUE")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_public_url", "TEXT DEFAULT ''")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "media_delivery", "TEXT DEFAULT 'base64'")
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "s3_retention_days", "INTEGER DEFAULT 30")
+			}
 		}
 	} else if migration.ID == 5 {
 		if db.DriverName() == "sqlite" {
@@ -426,28 +469,52 @@ func applyMigration(db *sqlx.DB, migration Migration) error {
 				err = addColumnIfNotExistsSQLite(tx, "users", "history", "INTEGER DEFAULT 0")
 			}
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL - use pooler-compatible table/column creation
+			err = createTableIfNotExistsPostgres(tx, "message_history", `
+				CREATE TABLE IF NOT EXISTS message_history (
+					id SERIAL PRIMARY KEY,
+					user_id TEXT NOT NULL,
+					chat_jid TEXT NOT NULL,
+					sender_jid TEXT NOT NULL,
+					message_id TEXT NOT NULL,
+					timestamp TIMESTAMP NOT NULL,
+					message_type TEXT NOT NULL,
+					text_content TEXT,
+					media_link TEXT,
+					UNIQUE(user_id, message_id)
+				)`)
+			if err == nil {
+				_, err = tx.Exec(`
+					CREATE INDEX IF NOT EXISTS idx_message_history_user_chat_timestamp 
+					ON message_history (user_id, chat_jid, timestamp DESC)`)
+			}
+			if err == nil {
+				err = addColumnIfNotExistsPostgres(tx, "users", "history", "INTEGER DEFAULT 0")
+			}
 		}
 	} else if migration.ID == 6 {
 		if db.DriverName() == "sqlite" {
 			// Add quoted_message_id column to message_history table for SQLite
 			err = addColumnIfNotExistsSQLite(tx, "message_history", "quoted_message_id", "TEXT")
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL
+			err = addColumnIfNotExistsPostgres(tx, "message_history", "quoted_message_id", "TEXT")
 		}
 	} else if migration.ID == 7 {
 		if db.DriverName() == "sqlite" {
 			// Add hmac_key column as BLOB for encrypted data in SQLite
 			err = addColumnIfNotExistsSQLite(tx, "users", "hmac_key", "BLOB")
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL
+			err = addColumnIfNotExistsPostgres(tx, "users", "hmac_key", "BYTEA")
 		}
 	} else if migration.ID == 8 {
 		if db.DriverName() == "sqlite" {
 			// Add dataJson column to message_history table for SQLite
 			err = addColumnIfNotExistsSQLite(tx, "message_history", "datajson", "TEXT")
 		} else {
-			_, err = tx.Exec(migration.UpSQL)
+			// PostgreSQL
+			err = addColumnIfNotExistsPostgres(tx, "message_history", "datajson", "TEXT")
 		}
 	} else {
 		_, err = tx.Exec(migration.UpSQL)
@@ -645,6 +712,105 @@ func addColumnIfNotExistsSQLite(tx *sqlx.Tx, tableName, columnName, columnDef st
 			return fmt.Errorf("failed to add column: %w", err)
 		}
 	}
+	return nil
+}
+
+// PostgreSQL helper functions - compatible with connection poolers (no PL/pgSQL)
+
+func createTableIfNotExistsPostgres(tx *sqlx.Tx, tableName, createSQL string) error {
+	// PostgreSQL supports CREATE TABLE IF NOT EXISTS natively
+	_, err := tx.Exec(createSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create table %s: %w", tableName, err)
+	}
+	return nil
+}
+
+func addColumnIfNotExistsPostgres(tx *sqlx.Tx, tableName, columnName, columnDef string) error {
+	// Check if column exists using information_schema
+	var exists bool
+	err := tx.Get(&exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns 
+			WHERE table_schema = 'public' 
+			AND table_name = $1 
+			AND column_name = $2
+		)`, tableName, columnName)
+	if err != nil {
+		return fmt.Errorf("failed to check column existence: %w", err)
+	}
+
+	if !exists {
+		_, err = tx.Exec(fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN %s %s",
+			tableName, columnName, columnDef))
+		if err != nil {
+			return fmt.Errorf("failed to add column %s to %s: %w", columnName, tableName, err)
+		}
+	}
+	return nil
+}
+
+func migratePostgresIDToString(tx *sqlx.Tx) error {
+	// Check if the id column is currently integer type
+	var dataType string
+	err := tx.Get(&dataType, `
+		SELECT data_type FROM information_schema.columns 
+		WHERE table_schema = 'public' 
+		AND table_name = 'users' 
+		AND column_name = 'id'`)
+	if err != nil {
+		// If error, column might not exist or table doesn't exist - skip migration
+		return nil
+	}
+
+	if dataType != "integer" {
+		// No migration needed - already text type
+		return nil
+	}
+
+	// Perform the migration
+	// 1. Add new column
+	_, err = tx.Exec(`ALTER TABLE users ADD COLUMN new_id TEXT`)
+	if err != nil {
+		return fmt.Errorf("failed to add new_id column: %w", err)
+	}
+
+	// 2. Generate random IDs
+	_, err = tx.Exec(`UPDATE users SET new_id = md5(random()::text || id::text || clock_timestamp()::text)`)
+	if err != nil {
+		return fmt.Errorf("failed to generate new IDs: %w", err)
+	}
+
+	// 3. Drop old primary key
+	_, err = tx.Exec(`ALTER TABLE users DROP CONSTRAINT users_pkey`)
+	if err != nil {
+		return fmt.Errorf("failed to drop old primary key: %w", err)
+	}
+
+	// 4. Drop old id column
+	_, err = tx.Exec(`ALTER TABLE users DROP COLUMN id CASCADE`)
+	if err != nil {
+		return fmt.Errorf("failed to drop old id column: %w", err)
+	}
+
+	// 5. Rename new column
+	_, err = tx.Exec(`ALTER TABLE users RENAME COLUMN new_id TO id`)
+	if err != nil {
+		return fmt.Errorf("failed to rename new_id to id: %w", err)
+	}
+
+	// 6. Set not null and add primary key
+	_, err = tx.Exec(`ALTER TABLE users ALTER COLUMN id SET NOT NULL`)
+	if err != nil {
+		return fmt.Errorf("failed to set id NOT NULL: %w", err)
+	}
+
+	_, err = tx.Exec(`ALTER TABLE users ADD PRIMARY KEY (id)`)
+	if err != nil {
+		return fmt.Errorf("failed to add primary key: %w", err)
+	}
+
 	return nil
 }
 
